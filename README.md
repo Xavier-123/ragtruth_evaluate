@@ -132,3 +132,36 @@ The broader system comparison can use:
 ```text
 agentic critic on - naive
 ```
+
+## RAGTruth-processed
+
+The repository also includes an oracle-context pair for `RAGTruth-processed`:
+
+- `run_ragtruth_processed_oracle.py`
+- `evaluate_ragtruth_processed_oracle.py`
+
+Default dataset:
+
+```bash
+data/ragtruth-processed/test-00000-of-00001.parquet
+```
+
+### Run Answer Generation (RAGTruth-processed)
+
+```bash
+python run_ragtruth_processed_oracle.py \
+  --mode agentic \
+  --enable-answer-critique \
+  --llm-config config/llm.json \
+  --critic-llm-config config/critic_llm.json \
+  --max-workers 2 \
+  --output output/ragtruth/ragtruth_processed_oracle_agentic_critic_on.jsonl
+```
+
+### Evaluate Outputs (RAGTruth-processed)
+
+```bash
+python evaluate_ragtruth_processed_oracle.py \
+  --input output/ragtruth/ragtruth_processed_oracle_agentic_critic_on.jsonl \
+  --max-workers 4
+```
