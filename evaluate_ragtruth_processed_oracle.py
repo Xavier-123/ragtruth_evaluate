@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-from functools import lru_cache
+from functools import lru_cache, partial
 import json
 import re
 import string
@@ -129,36 +129,29 @@ def parse_label_collection(values: list[Any]) -> bool | None:
 
 
 def parse_ground_truth_hallucination(record: dict[str, Any]) -> bool | None:
-    value = record.get("hallucination_labels_processed")
-    if value in (None, "", []):
-        value = record.get("hallucination_labels")
-    if value in (None, "", []):
-        return None
+    """Derive a boolean hallucination ground-truth from the RAGTruth-processed fields.
 
-    if isinstance(value, list):
-        return parse_label_collection(value)
-    if isinstance(value, tuple):
-        return parse_label_collection(list(value))
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            parsed_json = json.loads(text)
-        except json.JSONDecodeError:
-            parsed_json = None
-        if isinstance(parsed_json, list):
-            return parse_label_collection(parsed_json)
-        single = parse_label_value(text)
-        if single is not None:
-            return single
-        lowered = normalize_text(text)
-        if any(pos in lowered for pos in POSITIVE_LABELS):
-            return True
-        if any(neg in lowered for neg in NEGATIVE_LABELS):
-            return False
-        return None
-    return parse_label_value(value)
+    Priority order:
+    1. ``hallucination_labels_processed`` – a count dict such as
+       ``{"evident_conflict": 0, "baseless_info": 1}``.
+       Hallucinated when the sum of all label counts is > 0.
+    2. ``hallucination_labels`` – a list of span-annotation dicts (each entry
+       represents one annotated hallucination span).
+       Hallucinated when the list is non-empty.
+
+    Returns ``True`` (hallucinated), ``False`` (clean), or ``None`` (no usable label).
+    """
+    processed = record.get("hallucination_labels_processed")
+    if isinstance(processed, dict) and processed:
+        # Any label count > 0 indicates at least one hallucination
+        return sum(v for v in processed.values() if isinstance(v, (int, float))) > 0
+
+    labels = record.get("hallucination_labels")
+    if isinstance(labels, list):
+        # A non-empty list means at least one span was annotated as hallucination
+        return len(labels) > 0
+
+    return None
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -202,6 +195,8 @@ def evaluate_record(record: dict[str, Any], refusal_phrases: list[str]) -> dict[
     node_pred_hallucination = (not node_is_refusal) if is_ok else None
     return {
         "is_ok": is_ok,
+        "task_type": record.get("task_type", ""),
+        "quality": record.get("quality", ""),
         "final_is_refusal": final_is_refusal,
         "node_is_refusal": node_is_refusal,
         "final_is_empty": not final_answer.strip() if is_ok else False,
@@ -212,10 +207,10 @@ def evaluate_record(record: dict[str, Any], refusal_phrases: list[str]) -> dict[
         "label_mismatch_example": (
             {
                 "index": record.get("index"),
-                "id": record.get("id") or record.get("sample_id"),
-                "query": record.get("query") or record.get("question", ""),
+                "id": record.get("id"),
+                "query": record.get("query", ""),
                 "predicted_answer": final_answer,
-                "reference_output": record.get("reference_output") or record.get("output", ""),
+                "reference_output": record.get("reference_output", ""),
                 "gt_hallucination": gt_hallucination,
                 "final_pred_hallucination": final_pred_hallucination,
             }
@@ -240,7 +235,7 @@ def evaluate_records(
         return list(executor.map(partial(evaluate_record, refusal_phrases=refusal_phrases), records))
 
 
-def compute_binary_metrics(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
+def compute_binary_metrics(*, tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
     total = tp + tn + fp + fn
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
@@ -252,6 +247,33 @@ def compute_binary_metrics(tp: int, tn: int, fp: int, fn: int) -> dict[str, floa
         "f1": round(f1, 6),
         "accuracy": round(accuracy, 6),
     }
+
+
+def _empty_counts() -> dict[str, int]:
+    return {"tp": 0, "tn": 0, "fp": 0, "fn": 0}
+
+
+
+    """Return a fresh per-task-type accumulator dict."""
+    return {
+        "ok": 0,
+        "total": 0,
+        "final": _empty_counts(),
+        "node": _empty_counts(),
+        "final_labeled": 0,
+        "node_labeled": 0,
+    }
+
+
+def _accumulate_confusion(counts: dict[str, int], pred: bool, gt: bool) -> None:
+    if pred and gt:
+        counts["tp"] += 1
+    elif pred and not gt:
+        counts["fp"] += 1
+    elif not pred and gt:
+        counts["fn"] += 1
+    else:
+        counts["tn"] += 1
 
 
 def compute_metrics(
@@ -271,13 +293,28 @@ def compute_metrics(
     node_empty = 0
     label_mismatch_examples: list[dict[str, Any]] = []
 
-    final_tp = final_tn = final_fp = final_fn = 0
-    node_tp = node_tn = node_fp = node_fn = 0
-    labeled_count = 0
+    # Overall confusion matrices
+    final_counts = _empty_counts()
+    node_counts = _empty_counts()
+    # Track separately so each can be counted independently (not AND-gated)
+    final_labeled = 0
+    node_labeled = 0
 
-    for item in evaluations:
+    # Per-task-type accumulators: task_type -> {"final": counts, "node": counts, "ok": int, "total": int}
+    task_stats: dict[str, dict[str, Any]] = defaultdict(_empty_task_stats)
+    # Per-quality sample counts (e.g. good / truncated / incorrect_refusal)
+    quality_counts: dict[str, int] = defaultdict(int)
+
+    for item, record in zip(evaluations, records, strict=True):
+        task_type = item.get("task_type", "") or "unknown"
+        quality = item.get("quality", "") or "unknown"
+        task_stats[task_type]["total"] += 1
+        quality_counts[quality] += 1
+
         if not item["is_ok"]:
             continue
+
+        task_stats[task_type]["ok"] += 1
 
         if item["final_is_refusal"]:
             final_refusals += 1
@@ -291,78 +328,84 @@ def compute_metrics(
         gt = item["gt_hallucination"]
         final_pred = item["final_pred_hallucination"]
         node_pred = item["node_pred_hallucination"]
-        if gt is not None and final_pred is not None and node_pred is not None:
-            labeled_count += 1
-            if final_pred and gt:
-                final_tp += 1
-            elif final_pred and not gt:
-                final_fp += 1
-            elif (not final_pred) and gt:
-                final_fn += 1
-            else:
-                final_tn += 1
 
-            if node_pred and gt:
-                node_tp += 1
-            elif node_pred and not gt:
-                node_fp += 1
-            elif (not node_pred) and gt:
-                node_fn += 1
-            else:
-                node_tn += 1
-
+        # Update final metrics independently from node metrics
+        if gt is not None and final_pred is not None:
+            final_labeled += 1
+            task_stats[task_type]["final_labeled"] += 1
+            _accumulate_confusion(final_counts, final_pred, gt)
+            _accumulate_confusion(task_stats[task_type]["final"], final_pred, gt)
             if item["label_mismatch_example"] is not None and len(label_mismatch_examples) < 20:
                 label_mismatch_examples.append(item["label_mismatch_example"])
 
+        if gt is not None and node_pred is not None:
+            node_labeled += 1
+            task_stats[task_type]["node_labeled"] += 1
+            _accumulate_confusion(node_counts, node_pred, gt)
+            _accumulate_confusion(task_stats[task_type]["node"], node_pred, gt)
+
     if ok == 0:
+        zero_metrics = {"precision": 0.0, "recall": 0.0, "f1": 0.0, "accuracy": 0.0}
         return {
             "total": total,
             "ok": 0,
             "errors": errors,
             "error_rate": round(errors / total, 6) if total else 0.0,
-            "final_refusal_accuracy": 0.0,
+            "quality_counts": dict(quality_counts),
+            "final_refusal_rate": 0.0,
             "final_hallucination_rate_proxy": 0.0,
             "final_empty_answer_rate": 0.0,
-            "node_refusal_accuracy": 0.0,
+            "node_refusal_rate": 0.0,
             "node_hallucination_rate_proxy": 0.0,
             "node_empty_answer_rate": 0.0,
-            "labeled_count": 0,
-            "final_label_metrics": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "accuracy": 0.0},
-            "node_label_metrics": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "accuracy": 0.0},
+            "final_labeled_count": 0,
+            "node_labeled_count": 0,
+            "final_label_counts": _empty_counts(),
+            "final_label_metrics": zero_metrics,
+            "node_label_counts": _empty_counts(),
+            "node_label_metrics": zero_metrics,
+            "by_task_type": {},
             "refusal_phrases": refusal_phrases,
             "label_mismatch_examples": [],
         }
 
-    final_label_metrics = compute_binary_metrics(final_tp, final_tn, final_fp, final_fn)
-    node_label_metrics = compute_binary_metrics(node_tp, node_tn, node_fp, node_fn)
-    denominator = ok
+    final_label_metrics = compute_binary_metrics(**final_counts)
+    node_label_metrics = compute_binary_metrics(**node_counts)
+
+    # Build per-task-type summary
+    by_task_type: dict[str, Any] = {}
+    for ttype, ts in task_stats.items():
+        t_ok = ts["ok"]
+        by_task_type[ttype] = {
+            "total": ts["total"],
+            "ok": t_ok,
+            "final_labeled_count": ts["final_labeled"],
+            "node_labeled_count": ts["node_labeled"],
+            "final_label_counts": ts["final"],
+            "final_label_metrics": compute_binary_metrics(**ts["final"]),
+            "node_label_counts": ts["node"],
+            "node_label_metrics": compute_binary_metrics(**ts["node"]),
+        }
 
     return {
         "total": total,
         "ok": ok,
         "errors": errors,
         "error_rate": round(errors / total, 6) if total else 0.0,
-        "final_refusal_accuracy": round(final_refusals / denominator, 6),
-        "final_hallucination_rate_proxy": round(1.0 - final_refusals / denominator, 6),
-        "final_empty_answer_rate": round(final_empty / denominator, 6),
-        "node_refusal_accuracy": round(node_refusals / denominator, 6),
-        "node_hallucination_rate_proxy": round(1.0 - node_refusals / denominator, 6),
-        "node_empty_answer_rate": round(node_empty / denominator, 6),
-        "labeled_count": labeled_count,
-        "final_label_counts": {
-            "tp": final_tp,
-            "tn": final_tn,
-            "fp": final_fp,
-            "fn": final_fn,
-        },
-        "node_label_counts": {
-            "tp": node_tp,
-            "tn": node_tn,
-            "fp": node_fp,
-            "fn": node_fn,
-        },
+        "quality_counts": dict(quality_counts),
+        "final_refusal_rate": round(final_refusals / ok, 6),
+        "final_hallucination_rate_proxy": round(1.0 - final_refusals / ok, 6),
+        "final_empty_answer_rate": round(final_empty / ok, 6),
+        "node_refusal_rate": round(node_refusals / ok, 6),
+        "node_hallucination_rate_proxy": round(1.0 - node_refusals / ok, 6),
+        "node_empty_answer_rate": round(node_empty / ok, 6),
+        "final_labeled_count": final_labeled,
+        "node_labeled_count": node_labeled,
+        "final_label_counts": final_counts,
         "final_label_metrics": final_label_metrics,
+        "node_label_counts": node_counts,
         "node_label_metrics": node_label_metrics,
+        "by_task_type": by_task_type,
         "refusal_phrases": refusal_phrases,
         "label_mismatch_examples": label_mismatch_examples,
     }

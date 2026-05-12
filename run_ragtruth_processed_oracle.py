@@ -264,6 +264,7 @@ def create_workflow(
     enable_decomposition: bool,
     llm_config_path: Path | None,
     critic_llm_config_path: Path | None,
+    max_attempts: int = 3,
 ) -> AgenticRAGWorkflow:
     llm_client = OpenAIClient.from_config(config_path=llm_config_path)
     critic_client = (
@@ -293,7 +294,7 @@ def create_workflow(
     reasoner._critic_llm_client = critic_client
     return AgenticRAGWorkflow(
         orchestrator=Orchestrator(
-            config=OrchestratorConfig(default_max_attempts=3, default_should_retrieve=True),
+            config=OrchestratorConfig(default_max_attempts=max_attempts, default_should_retrieve=True),
             query_processor=query_processor,
             llm_client=llm_client,
             mode=mode,
@@ -367,24 +368,24 @@ def build_record(
     final_answer = run_result.get("final_answer") or {}
     if not isinstance(final_answer, dict):
         final_answer = {}
+    # hallucination_labels_processed is a count dict, e.g. {"evident_conflict": 0, "baseless_info": 1}
+    # hallucination_labels is a list of span annotation dicts
     return {
         "index": sample_index,
-        "sample_id": sample.get("id", ""),
         "id": sample.get("id", ""),
         "query": sample.get("query", ""),
-        "question": sample.get("query", ""),
         "reference_output": sample.get("output", ""),
         "task_type": sample.get("task_type", ""),
         "quality": sample.get("quality", ""),
         "model": sample.get("model", ""),
         "temperature": sample.get("temperature", ""),
         "hallucination_labels": sample.get("hallucination_labels", []),
-        "hallucination_labels_processed": sample.get("hallucination_labels_processed", []),
+        # default to {} (dict) to match the dataset schema, not []
+        "hallucination_labels_processed": sample.get("hallucination_labels_processed", {}),
         "input_str": sample.get("input_str", ""),
         "context_chars": len(str(sample.get("context") or "")),
         "mode": mode,
         "oracle_context": True,
-        "single_pass": mode == "agentic",
         "enable_answer_critique": enable_answer_critique,
         "enable_decomposition": enable_decomposition if mode == "agentic" else False,
         "predicted_answer": final_answer.get("answer", ""),
@@ -440,6 +441,7 @@ def run_sample(
             enable_decomposition=enable_decomposition,
             llm_config_path=llm_config_path,
             critic_llm_config_path=critic_llm_config_path,
+            max_attempts=max_attempts,
         )
         app = build_agentic_rag_graph(workflow=workflow, mode=mode)
         initial_state = create_initial_state(query=query, max_attempts=max_attempts)
