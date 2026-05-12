@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from functools import lru_cache
 import json
 import re
@@ -236,7 +237,7 @@ def evaluate_records(
     if max_workers == 1:
         return [evaluate_record(record, refusal_phrases) for record in records]
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return list(executor.map(lambda record: evaluate_record(record, refusal_phrases), records))
+        return list(executor.map(partial(evaluate_record, refusal_phrases=refusal_phrases), records))
 
 
 def compute_binary_metrics(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:

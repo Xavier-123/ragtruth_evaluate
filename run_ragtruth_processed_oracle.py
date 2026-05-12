@@ -160,8 +160,8 @@ def normalize_cell(value: Any) -> Any:
 def load_samples(path: Path, *, start: int, limit: int | None) -> list[dict[str, Any]]:
     if start < 0:
         raise ValueError(f"--start must be >= 0, got {start}")
-    if limit is not None and limit < 0:
-        raise ValueError(f"--limit must be >= 0, got {limit}")
+    if limit is not None and limit <= 0:
+        raise ValueError(f"--limit must be > 0, got {limit}")
 
     df = pd.read_parquet(path)
     if start:
