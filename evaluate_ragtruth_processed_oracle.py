@@ -253,7 +253,7 @@ def _empty_counts() -> dict[str, int]:
     return {"tp": 0, "tn": 0, "fp": 0, "fn": 0}
 
 
-
+def _empty_task_stats() -> dict[str, Any]:
     """Return a fresh per-task-type accumulator dict."""
     return {
         "ok": 0,
