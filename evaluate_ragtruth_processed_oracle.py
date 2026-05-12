@@ -253,6 +253,18 @@ def _empty_counts() -> dict[str, int]:
     return {"tp": 0, "tn": 0, "fp": 0, "fn": 0}
 
 
+
+    """Return a fresh per-task-type accumulator dict."""
+    return {
+        "ok": 0,
+        "total": 0,
+        "final": _empty_counts(),
+        "node": _empty_counts(),
+        "final_labeled": 0,
+        "node_labeled": 0,
+    }
+
+
 def _accumulate_confusion(counts: dict[str, int], pred: bool, gt: bool) -> None:
     if pred and gt:
         counts["tp"] += 1
@@ -289,14 +301,11 @@ def compute_metrics(
     node_labeled = 0
 
     # Per-task-type accumulators: task_type -> {"final": counts, "node": counts, "ok": int, "total": int}
-    task_stats: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"ok": 0, "total": 0, "final": _empty_counts(), "node": _empty_counts(),
-                 "final_labeled": 0, "node_labeled": 0}
-    )
+    task_stats: dict[str, dict[str, Any]] = defaultdict(_empty_task_stats)
     # Per-quality sample counts (e.g. good / truncated / incorrect_refusal)
     quality_counts: dict[str, int] = defaultdict(int)
 
-    for item, record in zip(evaluations, records):
+    for item, record in zip(evaluations, records, strict=True):
         task_type = item.get("task_type", "") or "unknown"
         quality = item.get("quality", "") or "unknown"
         task_stats[task_type]["total"] += 1
