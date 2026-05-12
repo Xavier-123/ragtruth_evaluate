@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import json
 import re
 import string
@@ -74,15 +75,26 @@ def normalize_text(text: str) -> str:
     return " ".join(without_punc.split())
 
 
+@lru_cache(maxsize=64)
+def compile_refusal_patterns(refusal_phrases_key: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+    patterns: list[re.Pattern[str]] = []
+    for phrase in refusal_phrases_key:
+        normalized_phrase = normalize_text(phrase)
+        if not normalized_phrase:
+            continue
+        patterns.append(re.compile(rf"\b{re.escape(normalized_phrase)}\b"))
+    return tuple(patterns)
+
+
 def is_refusal(answer: str, refusal_phrases: list[str]) -> bool:
     if not isinstance(answer, str):
         answer = str(answer)
     if not answer.strip():
         return True
     normalized = normalize_text(answer)
-    for phrase in refusal_phrases:
-        normalized_phrase = normalize_text(phrase)
-        if normalized_phrase and re.search(rf"\b{re.escape(normalized_phrase)}\b", normalized):
+    patterns = compile_refusal_patterns(tuple(refusal_phrases))
+    for pattern in patterns:
+        if pattern.search(normalized):
             return True
     return False
 

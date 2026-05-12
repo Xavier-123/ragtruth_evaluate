@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
+import traceback
 from typing import Any, Literal
 
 import pandas as pd
@@ -357,6 +358,8 @@ def build_record(
     run_result: dict[str, Any],
     status: str,
     error: str | None,
+    error_type: str | None,
+    error_traceback: str | None,
     mode: RunMode,
     enable_answer_critique: bool,
     enable_decomposition: bool,
@@ -391,6 +394,8 @@ def build_record(
         "logs": run_result.get("logs", []),
         "status": status,
         **({"error": error} if error else {}),
+        **({"error_type": error_type} if error_type else {}),
+        **({"error_traceback": error_traceback} if error_traceback else {}),
     }
 
 
@@ -441,10 +446,14 @@ def run_sample(
         run_result = dataclass_to_jsonable(app.invoke(initial_state))
         status = "ok"
         error = None
+        error_type = None
+        error_traceback = None
     except Exception as exc:  # noqa: BLE001
         run_result = {}
         status = "error"
         error = str(exc)
+        error_type = exc.__class__.__name__
+        error_traceback = traceback.format_exc()
 
     return build_record(
         sample_index=sample_index,
@@ -452,6 +461,8 @@ def run_sample(
         run_result=run_result,
         status=status,
         error=error,
+        error_type=error_type,
+        error_traceback=error_traceback,
         mode=mode,
         enable_answer_critique=enable_answer_critique,
         enable_decomposition=enable_decomposition,
