@@ -159,9 +159,9 @@ def normalize_cell(value: Any) -> Any:
 
 def load_samples(path: Path, *, start: int, limit: int | None) -> list[dict[str, Any]]:
     if start < 0:
-        raise ValueError("--start must be >= 0")
+        raise ValueError(f"--start must be >= 0, got {start}")
     if limit is not None and limit < 0:
-        raise ValueError("--limit must be >= 0")
+        raise ValueError(f"--limit must be >= 0, got {limit}")
 
     df = pd.read_parquet(path)
     if start:
@@ -185,7 +185,7 @@ class OracleRetriever:
         query_graph = state.get("query_graph")
         node_id = state.get("active_node_id")
         if not node_id:
-            raise ValueError("OracleRetriever requires active_node_id.")
+            raise ValueError(f"OracleRetriever requires active_node_id, got {node_id!r}")
 
         question = state.get("query", "")
         retrieval_query = question
@@ -485,7 +485,7 @@ def build_payload(
 def main() -> int:
     args = parse_args()
     if args.max_workers < 1:
-        raise SystemExit("--max-workers must be >= 1")
+        raise SystemExit(f"--max-workers must be >= 1, got {args.max_workers}")
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = args.log or DEFAULT_LOG_DIR / f"ragtruth_processed_oracle_{run_id}.log"

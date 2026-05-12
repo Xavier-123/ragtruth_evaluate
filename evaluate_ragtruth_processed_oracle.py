@@ -370,7 +370,7 @@ def compute_metrics(
 def main() -> int:
     args = parse_args()
     if args.max_workers < 1:
-        raise SystemExit("--max-workers must be >= 1")
+        raise SystemExit(f"--max-workers must be >= 1, got {args.max_workers}")
     records = load_records(args.input)
     metrics = compute_metrics(records, args.refusal_phrases, max_workers=args.max_workers)
     output_path = args.output or args.input.with_name(f"{args.input.stem}_eval.json")
